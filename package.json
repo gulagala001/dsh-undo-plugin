@@ -17,7 +17,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
-    "prepack": "node scripts/check-package.mjs"
+    "prepack": "npm run build && node scripts/check-package.mjs"
   },
   "files": [
     "src",
