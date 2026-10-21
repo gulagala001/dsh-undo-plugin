@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/gulagala001/dsh-undo-plugin/releases/tag/v0.1.0-dsh.0.2.1-rc.2"><img alt="0.1.0" src="https://img.shields.io/badge/release-0.1.0-0969da?style=flat-square"></a>
-  <a href="https://github.com/gulagala001/dsh-undo-plugin/releases/tag/v0.1.0-dsh.0.2.1-rc.2"><img alt="本版插件包下载次数，非用户数" src="https://img.shields.io/github/downloads/gulagala001/dsh-undo-plugin/v0.1.0-dsh.0.2.1-rc.2/gulagala001-dsh-undo-plugin-0.1.0-dsh.0.2.1-rc.2.tgz?style=flat-square&amp;label=package%20downloads&amp;displayAssetName=false&amp;color=0969da"></a>
+  <a href="https://github.com/gulagala001/dsh-undo-plugin/releases/tag/v0.1.0-dsh.0.2.1-rc.2"><img alt="本版插件包下载次数" src="https://img.shields.io/github/downloads/gulagala001/dsh-undo-plugin/v0.1.0-dsh.0.2.1-rc.2/gulagala001-dsh-undo-plugin-0.1.0-dsh.0.2.1-rc.2.tgz?style=flat-square&amp;label=package%20downloads&amp;displayAssetName=false&amp;color=0969da"></a>
   <a href="#readme-install"><img alt="DSH 0.2.1-rc.2" src="https://img.shields.io/badge/DSH-0.2.1--rc.2-0969da?style=flat-square"></a>
   <a href="https://github.com/gulagala001/dsh-undo-plugin/stargazers"><img alt="GitHub Stars" src="https://img.shields.io/github/stars/gulagala001/dsh-undo-plugin?style=flat-square&amp;color=0969da"></a>
 </p>
@@ -16,10 +16,6 @@
 <p align="center"><a href="#readme-install"><strong>开始使用</strong></a> · <a href="docs/usage.zh.md">完整文档</a> · <a href="https://github.com/gulagala001/dsh-undo-plugin/issues">反馈</a></p>
 
 <p align="center"><a href="docs/images/rewind.jpg"><img src="docs/images/rewind.jpg" alt="原生消息回退列表 / Native rewind list" width="880"></a></p>
-
-*输入框上方的真实回退界面，使用合成演示消息。*
-
-下载徽章只统计所链接发行版中的插件压缩包，不代表安装人数或活跃用户数。
 
 <a name="readme-install"></a>
 
