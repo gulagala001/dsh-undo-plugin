@@ -48,7 +48,7 @@ test('picker reads cold and compacted history in bounded pages, omitting withdra
  await assert.rejects(f.engine.candidates(f.session.id,-1),/无效/);
 });
 test('manual edits and stale confirmation do not get overwritten',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},()=>writeFile(join(f.cwd,'a'),'B'));finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);await writeFile(join(f.cwd,'a'),'manual');await assert.rejects(f.engine.execute(f.session.id,p.planId),/新的改动/);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'manual');assert.equal(f.session.deriveMessages().length,2);});
-test('restore failure compensates already written files and keeps undo evidence',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');await writeFile(join(f.cwd,'b'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},async()=>{await writeFile(join(f.cwd,'a'),'B');await writeFile(join(f.cwd,'b'),'B');});finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);const put=f.engine.files.put.bind(f.engine.files);let fail=true;f.engine.files.put=async(root,path,value)=>{if(path==='b'&&fail){fail=false;throw Error('injected write failure');}return put(root,path,value);};await assert.rejects(f.engine.execute(f.session.id,p.planId),/injected/);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'B');assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'B');assert.equal(f.session.deriveMessages().length,2);assert.equal((await f.engine.store.load(f.session.id)).journal,null);});
+test('restore failure compensates already written files and keeps undo evidence',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');await writeFile(join(f.cwd,'b'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},async()=>{await writeFile(join(f.cwd,'a'),'B');await writeFile(join(f.cwd,'b'),'B');});finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);const put=f.engine.files.put.bind(f.engine.files);let fail=true;f.engine.files.put=async(root,path,value,expected)=>{if(path==='b'&&fail){fail=false;throw Error('injected write failure');}return put(root,path,value,expected);};await assert.rejects(f.engine.execute(f.session.id,p.planId),/injected/);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'B');assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'B');assert.equal(f.session.deriveMessages().length,2);assert.equal((await f.engine.store.load(f.session.id)).journal,null);});
 test('tool-call pairing survives native surface replay',async t=>{const f=await fixture(t);await user(f,'tool',1);const call={type:'tool-call',id:'original-call',name:'read',arguments:'{}'};f.session.append('assistant/message',{turn:1,step:1,stream:[],message:createMessage({role:'assistant',source:{kind:'model',provider:'test',model:'test'},content:[call]})},{surfaceOp:'append'});f.session.append('tool/call',{turn:1,step:1,callId:'original-call',name:'read',arguments:'{}'});f.session.append('tool/result',{turn:1,step:1,message:{id:'result',role:'tool',source:{kind:'tool',name:'read',callId:'original-call'},toolCallId:'original-call',content:[{type:'text',text:'ok'}]}},{surfaceOp:'append'});f.session.append('step/end',{turn:1,step:1});f.session.append('turn/end',{turn:1,reason:{kind:'completed'}});const context=snapshot(f.session);appendPrepared(f.session,prepareReplay(f.session,[]));appendPrepared(f.session,prepareReplay(f.session,context));const ms=f.session.deriveMessages();assert.equal(ms[1].content[0].id,ms[2].toolCallId);assert.notEqual(ms[2].toolCallId,'original-call');assert.equal(f.session.snapshotEvents().filter(e=>e.type==='turn/start').length,3);Session.create(f.session.id,f.session.snapshotEvents(),f.session.header);validateHistory(f.session);});
 test('rewind crosses a compacted surface and undo restores that exact summary',async t=>{
  const f=await fixture(t),seq=await user(f,'old request',1);finish(f,'old answer',1);
@@ -83,4 +83,28 @@ test('interrupted file transaction is recovered from disk before another mutatio
  await f.engine.files.apply(record.root,record.changes);
  const {Store}=await import('../src/store.mjs'),{Files}=await import('../src/files.mjs');f.engine.store=new Store(join(f.dir,'store'));f.engine.files=new Files(join(f.dir,'store'));
  await f.engine.launch(f.session.id,{recovery:true});assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'B');assert.equal((await f.engine.store.load(f.session.id)).journal,null);validateHistory(f.session);
+});
+
+test('a conflict during restoration keeps the journal and can resume after the conflict is resolved',async t=>{
+ const f=await fixture(t),a=join(f.cwd,'a'),b=join(f.cwd,'b');await writeFile(a,'A1');await writeFile(b,'A2');const seq=await user(f,'edit',1);
+ await f.engine.tool({agent:f.agent},async()=>{await writeFile(a,'B1');await writeFile(b,'B2');});finish(f,'done',1);
+ const plan=await f.engine.preview(f.session.id,seq),before=messages(f.session),readBlob=f.engine.files.readBlob.bind(f.engine.files);
+ f.engine.files.readBlob=async key=>{const bytes=await readBlob(key);if(bytes.toString()==='A2')await writeFile(b,'external edit');return bytes;};
+ await assert.rejects(f.engine.execute(f.session.id,plan.planId),/恢复尚未完成/);
+ assert.equal(await readFile(a,'utf8'),'A1');assert.equal(await readFile(b,'utf8'),'external edit');assert.deepEqual(messages(f.session),before);
+ assert.ok((await f.engine.store.load(f.session.id)).journal);
+ const {Store}=await import('../src/store.mjs'),{Files}=await import('../src/files.mjs');
+ f.engine.store=new Store(join(f.dir,'store'));f.engine.files=new Files(join(f.dir,'store'));await writeFile(b,'B2');
+ await f.engine.launch(f.session.id,{recovery:true});
+ assert.equal(await readFile(a,'utf8'),'B1');assert.equal(await readFile(b,'utf8'),'B2');assert.equal((await f.engine.store.load(f.session.id)).journal,null);
+ assert.deepEqual(messages(f.session),before);validateHistory(f.session);
+});
+
+test('replay appends use the native sequence fence without copying the entire log per event',async t=>{
+ const f=await fixture(t);await user(f,'request',1);finish(f,'answer',1);
+ const replay=prepareReplay(f.session,[]),snapshotEvents=f.session.snapshotEvents.bind(f.session);let copies=0;
+ f.session.snapshotEvents=(...args)=>{copies++;return snapshotEvents(...args);};
+ appendPrepared(f.session,replay);assert.equal(copies,0);validateHistory(f.session);
+ const stale=prepareReplay(f.session,[]);f.session.append('plan/mode',{active:true});
+ assert.throws(()=>appendPrepared(f.session,stale),/会话在确认后发生变化/);
 });

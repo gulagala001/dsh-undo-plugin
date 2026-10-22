@@ -86,3 +86,51 @@ test('runtime collection waits for unpublished captures and invalidates cached h
     assert.equal((await engine.files.readBlob(manifest.unused.hash)).length,2*1024*1024);
   });
 });
+
+test('all legal file names survive capture, JSON persistence, creation and deletion',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'rewind-names-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const root=join(dir,'store'),workspace=join(dir,'workspace');await mkdir(workspace);
+  const names=['__proto__','constructor','toString','hasOwnProperty'];
+  const files=new Files(root),empty=(await files.capture(workspace)).manifest;
+  for(const name of names)await writeFile(join(workspace,name),'original '+name);
+  const captured=await files.capture(workspace),saved=JSON.parse(JSON.stringify(captured.manifest));
+  assert.deepEqual(Object.keys(saved).sort(),names.sort());
+  assert.ok(difference(empty,saved).every(c=>c.before===null));
+  assert.ok(difference(saved,empty).every(c=>c.after===null));
+  await files.apply(captured.root,difference(empty,saved));
+  assert.deepEqual((await files.capture(workspace)).manifest,{});
+  await files.apply(captured.root,difference(saved,empty));
+  for(const name of names)assert.equal(await readFile(join(workspace,name),'utf8'),'original '+name);
+});
+
+test('restore does not overwrite an edit made while backup bytes are being read',async t=>{
+ for(const missing of [false,true])await t.test(missing?'deleted destination':'existing destination',async t=>{
+  const dir=await mkdtemp(join(tmpdir(),'rewind-write-race-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const root=join(dir,'store'),workspace=join(dir,'workspace');await mkdir(workspace);
+  const path=join(workspace,'file'),files=new Files(root);
+  await writeFile(path,'original');const before=await files.capture(workspace);
+  if(missing)await rm(path);else await writeFile(path,'tool edit');const after=await files.capture(workspace);
+  const readBlob=files.readBlob.bind(files);
+  files.readBlob=async key=>{const bytes=await readBlob(key);await writeFile(path,'external edit');return bytes;};
+  await assert.rejects(files.apply(before.root,difference(before.manifest,after.manifest)),/文件.*改动|文件.*变化/);
+  assert.equal(await readFile(path,'utf8'),'external edit');
+ });
+});
+
+test('recovery rechecks each write after preflight, including deletions',async t=>{
+  for(const created of [false,true])await t.test(created?'new file':'existing file',async t=>{
+    const dir=await mkdtemp(join(tmpdir(),'rewind-recovery-race-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+    const root=join(dir,'store'),workspace=join(dir,'workspace');await mkdir(workspace);
+    const files=new Files(root);
+    await writeFile(join(workspace,'a'),'A');
+    if(!created)await writeFile(join(workspace,'b'),'A');
+    const before=await files.capture(workspace);
+    await writeFile(join(workspace,'a'),'B');await writeFile(join(workspace,'b'),'B');
+    const after=await files.capture(workspace),changes=difference(before.manifest,after.manifest);
+    const put=files.put.bind(files);
+    files.put=async(...args)=>{await put(...args);if(args[1]==='a')await writeFile(join(workspace,'b'),'external edit');};
+    await assert.rejects(files.recover(before.root,changes,'before'),/文件.*改动|文件.*变化/);
+    assert.equal(await readFile(join(workspace,'a'),'utf8'),'A');
+    assert.equal(await readFile(join(workspace,'b'),'utf8'),'external edit');
+  });
+});
