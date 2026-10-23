@@ -11,6 +11,67 @@ const messages=s=>s.deriveMessages().map(({id,...m})=>m);
 async function fixture(t){const dir=await mkdtemp(join(tmpdir(),'rewind-'));t.after(()=>rm(dir,{recursive:true,force:true}));const cwd=join(dir,'project');await mkdir(cwd);const session=Session.create('same-session',undefined,{...Session.create('same-session').header,cwd});const agent={id:session.id,session,status:'idle',runMaintenance:fn=>fn()};const ctx={sessions:{get:()=>session,flush:async()=>{},messageProjections:[]},agents:{get:()=>agent,list:()=>[agent]}};const engine=new RewindEngine(ctx,join(dir,'store'));agent.inbox={nextTurn:[],nextStep:[],prepend(target,m){this[target==='next-turn'?'nextTurn':'nextStep'].unshift(m);}};agent.steer=m=>queueMicrotask(async()=>{const turn=(session.snapshotEvents().findLast(e=>e.type==='turn/start')?.data.turn||0)+1;session.append('turn/start',{turn});await engine.preStep({agent,messages:[m],turn,step:1},()=>{throw Error('maintenance requested model');});const end=session.append('turn/end',{turn,reason:{kind:'blocked'}});engine.finish(session,end);});return {dir,cwd,session,agent,engine,ctx};}
 async function user(f,text,turn){const m=createUserMessage({source:{kind:'user'},content:[{type:'text',text}]});f.session.append('turn/start',{turn});await f.engine.checkpoint(f.agent,[m]);const e=f.session.append('user/message',m,{surfaceOp:'append'});f.session.append('step/start',{turn,step:1});return e.seq;}
 function finish(f,text,turn){f.session.append('assistant/message',{turn,step:1,stream:[],message:createMessage({role:'assistant',source:{kind:'model',provider:'test',model:'test'},content:[{type:'text',text}]})},{surfaceOp:'append'});f.session.append('step/end',{turn,step:1});f.session.append('turn/end',{turn,reason:{kind:'completed'}});}
+const todo = s => s.snapshotEvents().findLast(e => e.type === 'todo/write')?.data;
+const taskRecord = title => ({ todos: [{ content: title, status: 'pending' }],
+ tasks: [{ id: 'T4', title, done: false, anchor: null, links: [{ id: 'L2', kind: 'text', note: 'observed', reason: 'manual' }] }],
+ excerpts: [], nextT: 5, nextE: 1, nextL: 3, extension: { preserved: true } });
+
+test('rewind and undo restore the complete native task record and cold history', async t => {
+ const f = await fixture(t), earlier = taskRecord('earlier'), later = taskRecord('later');
+ await user(f, 'first request', 1); f.session.append('todo/write', earlier); finish(f, 'first result', 1);
+ const target = await user(f, 'second request', 2); f.session.append('todo/write', later); finish(f, 'second result', 2);
+ const original = structuredClone(f.session.snapshotEvents());
+ const plan = await f.engine.preview(f.session.id, target); assert.equal(plan.canApply, true, plan.reason);
+ await f.engine.execute(f.session.id, plan.planId);
+ assert.deepEqual(todo(f.session), earlier);
+ const restored = Session.create(f.session.id, f.session.snapshotEvents(), f.session.header);
+ assert.deepEqual(todo(restored), earlier);
+ const undo = await f.engine.preview(f.session.id, null, true); assert.equal(undo.canApply, true, undo.reason);
+ await f.engine.execute(f.session.id, undo.planId);
+ assert.deepEqual(todo(f.session), later);
+ assert.deepEqual(f.session.snapshotEvents().slice(0, original.length), original);
+ validateHistory(f.session);
+});
+
+test('rewind before the first task writes an empty native snapshot and undo restores evidence', async t => {
+ const f = await fixture(t), target = await user(f, 'first request', 1), record = taskRecord('new task');
+ f.session.append('todo/write', record); finish(f, 'result', 1);
+ const plan = await f.engine.preview(f.session.id, target); await f.engine.execute(f.session.id, plan.planId);
+ assert.deepEqual(todo(f.session), { todos: [] });
+ const undo = await f.engine.preview(f.session.id, null, true); await f.engine.execute(f.session.id, undo.planId);
+ assert.deepEqual(todo(f.session), record);
+});
+
+test('failed replay publication restores the pre-operation task record through the same recovery path', async t => {
+ const f = await fixture(t); f.session.append('todo/write', taskRecord('before request'));
+ const target = await user(f, 'change tasks', 1), record = taskRecord('before failed rewind');
+ f.session.append('todo/write', record); finish(f, 'result', 1);
+ const plan = await f.engine.preview(f.session.id, target); let flushes = 0;
+ // Fail before the commit marker, after the task snapshot has been appended.
+ const append = f.session.append.bind(f.session); let fail = true;
+ f.session.append = (type, ...args) => {
+  if (type === 'plan/mode' && fail) { fail = false; throw Error('synthetic commit failure'); }
+  return append(type, ...args);
+ };
+ f.ctx.sessions.flush = async () => { flushes++; };
+ await assert.rejects(f.engine.execute(f.session.id, plan.planId), /synthetic commit failure/);
+ assert.deepEqual(todo(f.session), record);
+ assert.equal((await f.engine.store.load(f.session.id)).journal, null);
+ assert.ok(flushes); validateHistory(f.session);
+});
+
+test('legacy message-only replay does not invent a task cutoff', async t => {
+ const f = await fixture(t), target = await user(f, 'request', 1); finish(f, 'answer', 1);
+ const record = taskRecord('legacy current task'); f.session.append('todo/write', record);
+ const oldContext = snapshot(f.session), plan = await f.engine.preview(f.session.id, target);
+ await f.engine.execute(f.session.id, plan.planId);
+ const st = await f.engine.store.load(f.session.id); st.undo.at(-1).context = oldContext; await f.engine.store.save(st);
+ f.session.append('todo/write', record);
+ const undo = await f.engine.preview(f.session.id, null, true);
+ assert.ok(undo.warnings.some(warning => warning.includes('任务清单保持现状')));
+ await f.engine.execute(f.session.id, undo.planId);
+ assert.deepEqual(todo(f.session), record);
+});
 test('plain chat records a checkpoint without scanning files and backup failures do not prevent tools',async t=>{
  const f=await fixture(t);let captures=0;
  f.engine.files.capture=async()=>{captures++;throw Error('synthetic backup unavailable');};
