@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {Files} from '../src/files.mjs';
+
+test('capture shares only pending path reads and refreshes settled filesystem observations',async t=>{
+  const dir=await fs.mkdtemp(join(tmpdir(),'rewind-path-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const root=join(dir,'project'),parent=join(root,'src'),outside=join(dir,'outside');
+  await fs.mkdir(parent,{recursive:true});await fs.mkdir(outside);
+  const files=new Files(join(dir,'store')),pending=new Map(),calls={stat:0,root:0};
+  const lstat=fs.lstat,realpath=fs.realpath;
+  let fail=false,release;
+  const gate=new Promise(resolve=>release=resolve);
+  t.mock.method(fs,'lstat',async path=>{calls.stat++;await gate;if(fail)throw Object.assign(Error('read failed'),{code:'EIO'});return lstat(path);});
+  t.mock.method(fs,'realpath',async path=>{calls.root++;return realpath(path);});
+  syncBuiltinESMExports();t.after(()=>{t.mock.restoreAll();syncBuiltinESMExports();});
+  const reads=Array.from({length:12},(_,i)=>files.path(root,`src/${i}`,pending));
+  assert.equal(calls.stat,1);release();
+  assert.deepEqual(await Promise.all(reads),Array.from({length:12},(_,i)=>join(parent,String(i))));
+  assert.deepEqual(calls,{stat:1,root:1});assert.equal(pending.size,0);
+  await files.path(root,'src/later',pending);assert.deepEqual(calls,{stat:2,root:2});
+  await fs.rename(parent,parent+'-old');await fs.symlink(outside,parent);
+  await assert.rejects(files.path(root,'src/later',pending),/父目录已改变/);assert.equal(pending.size,0);
+  await fs.unlink(parent);await fs.rename(parent+'-old',parent);
+  fail=true;
+  const failures=await Promise.allSettled(Array.from({length:12},()=>files.path(root,'src/later',pending)));
+  assert.ok(failures.every(r=>r.status==='rejected'&&r.reason.code==='EIO'));assert.equal(pending.size,0);
+  fail=false;await files.path(root,'src/retry',pending);assert.equal(pending.size,0);
+  await fs.rename(root,root+'-old');await fs.symlink(outside,root);
+  await assert.rejects(files.path(root,'file',pending),/工作区路径已改变/);assert.equal(pending.size,0);
+});
