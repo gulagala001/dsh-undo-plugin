@@ -76,7 +76,7 @@ test('plain chat records a checkpoint without scanning files and backup failures
  const f=await fixture(t);let captures=0;
  f.engine.files.capture=async()=>{captures++;throw Error('synthetic backup unavailable');};
  const seq=await user(f,'chat',1);assert.equal(captures,0);
- let ran=false;await f.engine.tool({agent:f.agent},async()=>{ran=true;});assert.equal(ran,true);
+ let ran=false;await f.engine.tool({agent:f.agent},async()=>{ran=true;});assert.equal(ran,true);assert.equal(captures,1,'a failed pre-image must not trigger another full scan after the tool');
  finish(f,'done',1);const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,false);assert.match(plan.reason,/未完整备份/);
 });
 test('cold history can read rewind state without activating an agent, then preview resumes it',async t=>{
