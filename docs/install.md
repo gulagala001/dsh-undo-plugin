@@ -1,5 +1,7 @@
 # DSH Rewind — 安装与维护
 
+源码构建以 `package.json` 的完整宿主版本为准，当前默认 `0.2.1-rc.3`；SDK、组件与依赖锁必须来自同一版本。
+
 [English](install_EN.md) · [返回首页](../README.md#readme-install)
 
 **DSH 0.2.1-rc.2 · Node.js ≥22.19 · 0.1.0**

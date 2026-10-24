@@ -1,5 +1,7 @@
 # DSH Rewind — Installation and maintenance
 
+Source builds target exactly DSH `0.2.1-rc.3`, with the matching SDK, components and dependency lock.
+
 [简体中文](install.md) · [README](../README_EN.md#readme-install)
 
 **DSH 0.2.1-rc.2 · Node.js ≥22.19 · 0.1.0**
