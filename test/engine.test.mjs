@@ -84,7 +84,7 @@ test('cold history can read rewind state without activating an agent, then previ
  const st=await f.engine.store.load(f.session.id);st.hiddenRanges=[{start:seq,end:seq}];await f.engine.store.save(st);
  let active=false,resumes=0;
  f.ctx.sessions.get=()=>active?f.session:undefined;f.ctx.agents.get=()=>active?f.agent:undefined;
- f.ctx.sessionController={inspect:async()=>({events:f.session.snapshotEvents()}),resolveAgent:async()=>{resumes++;active=true;return {agent:f.agent};}};
+ f.ctx.sessionQuery={observeSession:async()=>({header:f.session.header,events:f.session.snapshotEvents(),inheritedEventCount:0,[Symbol.dispose](){}})};f.ctx.sessionController={resolveAgent:async()=>{resumes++;active=true;return {agent:f.agent};}};
  const state=await f.engine.getState(f.session.id);assert.equal(state.error,undefined);assert.deepEqual(state.hiddenTurns,[1]);assert.equal(resumes,0);
  st.hiddenRanges=[];await f.engine.store.save(st);
  const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true,plan.reason);assert.equal(resumes,1);
@@ -103,7 +103,7 @@ test('picker reads cold and compacted history in bounded pages, omitting withdra
  const nodes=[...f.session.surface.nodes];f.session.append('user/message',createUserMessage({source:{kind:'test-summary'},content:[{type:'text',text:'summary'}]}),{surfaceOp:{op:'replace',startSeq:nodes[0],endSeq:nodes.at(-1)},sourceEventSeqs:nodes});
  const st=await f.engine.store.load(f.session.id);st.hiddenRanges=[{start:seqs.at(-1),end:seqs.at(-1)}];await f.engine.store.save(st);
  f.ctx.sessions.get=()=>undefined;f.ctx.agents.get=()=>{throw Error('picker must not activate agents');};
- f.ctx.sessionController={inspect:async()=>({events:f.session.snapshotEvents()})};f.engine.files.capture=()=>{throw Error('picker must not scan files');};
+ f.ctx.sessionQuery={observeSession:async()=>({header:f.session.header,events:f.session.snapshotEvents(),inheritedEventCount:0,[Symbol.dispose](){}})};f.ctx.sessionController={};f.engine.files.capture=()=>{throw Error('picker must not scan files');};
  const first=await f.engine.candidates(f.session.id);assert.equal(first.items.length,100);assert.equal(first.items[0].seq,seqs[103]);assert.ok(first.items.every(i=>i.text.length<=240));assert.equal(first.before,seqs[4]);
  const second=await f.engine.candidates(f.session.id,first.before);assert.deepEqual(second.items.map(i=>i.seq),seqs.slice(0,4).reverse());assert.ok(second.items.every(i=>i.conversationOnly));assert.equal(second.before,null);
  await assert.rejects(f.engine.candidates(f.session.id,-1),/无效/);
