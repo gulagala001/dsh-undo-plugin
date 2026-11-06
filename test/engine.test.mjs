@@ -79,6 +79,50 @@ test('plain chat records a checkpoint without scanning files and backup failures
  let ran=false;await f.engine.tool({agent:f.agent},async()=>{ran=true;});assert.equal(ran,true);assert.equal(captures,1,'a failed pre-image must not trigger another full scan after the tool');
  finish(f,'done',1);const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,false);assert.match(plan.reason,/未完整备份/);
 });
+
+test('snapshot timeout lets concurrent tools run, records the gap and avoids immediate rescans',async t=>{
+ const f=await fixture(t),seq=await user(f,'large workspace',1);
+ f.engine.root=async()=>f.cwd;
+ const entered=Promise.withResolvers();let captures=0;
+ f.engine.files.capture=async(_cwd,{signal})=>{
+   captures++;entered.resolve();
+   return new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));
+ };
+ t.mock.timers.enable({apis:['setTimeout']});
+ const first=f.engine.tool({agent:f.agent,name:'run_code'},()=>42);
+ await entered.promise;
+ const second=f.engine.tool({agent:f.agent,name:'run_code'},()=>43);
+ t.mock.timers.tick(4000);
+ assert.deepEqual(await Promise.all([first,second]),[42,43]);
+ assert.equal(captures,1);
+ assert.deepEqual(await f.engine.tool({agent:f.agent,name:'run_code'},()=>44),44);
+ assert.equal(captures,1);
+ finish(f,'done',1);
+ const plan=await f.engine.preview(f.session.id,seq);
+ assert.equal(plan.canApply,false);assert.match(plan.reason,/超出时间预算/);
+ assert.equal(f.engine.waves.size,0);
+});
+
+for(const phase of ['before','after'])test(`cancel during the ${phase} snapshot releases the workspace and leaves only real backup gaps`,async t=>{
+ const f=await fixture(t),seq=await user(f,'stop during backup',1),controller=new AbortController();
+ const entered=Promise.withResolvers(),realCapture=f.engine.files.capture.bind(f.engine.files);
+ let captures=0,bodies=0;
+ f.engine.files.capture=async(cwd,options)=>{
+   if(++captures!==(phase==='before'?1:2))return realCapture(cwd,options);
+   entered.resolve();
+   return new Promise((_,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));
+ };
+ const result=f.engine.tool({agent:f.agent,signal:controller.signal},()=>++bodies).catch(error=>error);
+ await entered.promise;controller.abort(Error('stop snapshot'));
+ assert.equal(phase==='before'?(await result).message:await result,phase==='before'?'stop snapshot':1);
+ assert.equal(bodies,phase==='before'?0:1);
+ assert.equal(f.engine.waves.size,0);
+ assert.deepEqual(await f.engine.tool({agent:f.agent},()=>++bodies),phase==='before'?1:2);
+ finish(f,'done',1);
+ const plan=await f.engine.preview(f.session.id,seq);
+ assert.equal(plan.canApply,phase==='before');
+ if(phase==='after')assert.match(plan.reason,/工具执行已取消/);
+});
 test('cold history can read rewind state without activating an agent, then preview resumes it',async t=>{
  const f=await fixture(t),seq=await user(f,'cold request',1);finish(f,'done',1);
  const st=await f.engine.store.load(f.session.id);st.hiddenRanges=[{start:seq,end:seq}];await f.engine.store.save(st);

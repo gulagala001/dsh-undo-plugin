@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {Store,lease} from '../src/store.mjs';
 import {RewindEngine} from '../src/engine.mjs';
 import {Maintenance} from '../src/maintenance.mjs';
+import {Files} from '../src/files.mjs';
 
 async function fixture(t){
   const root=await mkdtemp(join(tmpdir(),'rewind-lock-'));
@@ -113,4 +114,22 @@ test('maintenance admission observes cancellation without entering the operation
   const observed=waiting.then(()=>null,error=>error);controller.abort(Error('cancel maintenance'));
   assert.match((await deadline(observed))?.message??'',/cancel maintenance/);
   gate.resolve();await owner;await observed;assert.equal(calls,0);assert.equal(maintenance.active,0);
+});
+
+test('a cancelled pack wait leaves no cache or unpublished data that a later capture can reuse',async t=>{
+  const {root}=await fixture(t),workspace=join(root,'workspace'),storage=join(root,'store');
+  await mkdir(workspace);await writeFile(join(workspace,'sample'),'kept bytes');
+  const release=await lease(join(storage,'pack-index.lock'));t.after(release);
+  const files=new Files(storage),entered=Promise.withResolvers(),controller=new AbortController();
+  const flush=files.flushBlobs.bind(files);
+  t.mock.method(files,'flushBlobs',(...args)=>{entered.resolve();return flush(...args);});
+  const capture=files.capture(workspace,{signal:controller.signal});
+  const observed=capture.catch(error=>error);
+  await entered.promise;controller.abort(Error('stop pack wait'));
+  assert.match((await deadline(observed))?.message??'',/stop pack wait/);
+  assert.equal(files.cache.size,0);
+  await assert.rejects(readFile(join(storage,'blob-index.json')),{code:'ENOENT'});
+  await release();
+  const result=await files.capture(workspace);
+  assert.equal((await files.readBlob(result.manifest.sample.hash)).toString(),'kept bytes');
 });
