@@ -3,7 +3,7 @@
   "published": "0.1.11-dsh.0.2.2-rc.1",
   "repository": {
     "slug": "gulagala001/dsh-undo-plugin",
-    "description": "Rewind conversations and files in DeepSeek Harness, with undo.",
+    "description": "撤回 DSH 里的对话和文件改动，撤回后还能恢复。 Rewind conversations and file changes in DeepSeek Harness, with undo.",
     "homepage": "",
     "topics": [
       "checkpoint",
