@@ -5,6 +5,8 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {Session} from '@deepseek-ai/dsh-session';
 import {createUserMessage,createMessage} from '@deepseek-ai/dsh-llm';
+import {hiddenNode, visibleGroup} from '../src/client/visibility.mjs';
+import {inputBoundaries} from '../src/boundary.mjs';
 import {RewindEngine} from '../src/engine.mjs';
 import {snapshot,prepareReplay,appendPrepared,validateHistory} from '../src/conversation.mjs';
 const messages=s=>s.deriveMessages().map(({id,...m})=>m);
@@ -212,4 +214,90 @@ test('replay appends use the native sequence fence without copying the entire lo
  appendPrepared(f.session,replay);assert.equal(copies,0);validateHistory(f.session);
  const stale=prepareReplay(f.session,[]);f.session.append('plan/mode',{active:true});
  assert.throws(()=>appendPrepared(f.session,stale),/会话在确认后发生变化/);
+});
+
+
+async function admittedInput(f, text, turn, step = 1, openTurn = true) {
+ const message = createUserMessage({source:{kind:'user'},content:[{type:'text',text}]});
+ if(openTurn)f.session.append('turn/start',{turn});
+ await f.engine.checkpoint(f.agent,[message]);
+ const start=f.session.append('step/start',{turn,step}).seq;
+ const injection=f.session.append('user/message',createUserMessage({source:{kind:'plugin:oh-my-dsh:tasks'},content:[{type:'text',text:'[runtime state] synthetic'}]}),{surfaceOp:'append'}).seq;
+ const seq=f.session.append('user/message',message,{surfaceOp:'append'}).seq;
+ return {start,injection,seq};
+}
+
+test('rewind removes the native pre-input prologue and its process group; undo restores it exactly',async t=>{
+ const f=await fixture(t),{start,injection,seq}=await admittedInput(f,'request',1);
+ finish(f,'answer',1);
+ const original=structuredClone(f.session.snapshotEvents()),before=messages(f.session);
+ const plan=await f.engine.preview(f.session.id,seq),result=await f.engine.execute(f.session.id,plan.planId);
+ assert.equal(messages(f.session).length,0,'runtime prologue must not remain in model context');
+ assert.deepEqual(result.state.hiddenTurns,[1,2]);
+ assert.equal(result.state.hiddenSteps,2);
+ const location={kind:'step',turn:{turn:1},step:{start:{seq:start}}};
+ const nodes=new Map([
+  ['injection',{anchorSeq:injection,data:{seq:injection},location}],
+  ['prompt',{anchorSeq:start-0.1,data:{text:'prompt'},location}],
+  ['process',{anchorSeq:start-0.1,data:{turn:1},location:{kind:'turn',turn:{turn:1}}}],
+ ]);
+ for(const node of nodes.values())assert.equal(hiddenNode(node,result.state),true);
+ assert.equal(visibleGroup({members:[{key:'injection'}],data:{turn:1}},nodes,result.state),undefined);
+ const cold=Session.create(f.session.id,f.session.snapshotEvents(),f.session.header);
+ assert.equal(messages(cold).length,0);
+ const undo=await f.engine.preview(f.session.id,null,true);await f.engine.execute(f.session.id,undo.planId);
+ assert.deepEqual(messages(f.session),before);
+ const state=await f.engine.getState(f.session.id);
+ for(const node of nodes.values())assert.equal(hiddenNode(node,state),false);
+ assert.deepEqual(f.session.snapshotEvents().slice(0,original.length),original);
+ validateHistory(f.session);
+});
+
+test('rewind of later-step steering removes only that admission and keeps earlier work in its turn',async t=>{
+ const f=await fixture(t);await admittedInput(f,'first',1);
+ f.session.append('assistant/message',{turn:1,step:1,stream:[],message:createMessage({role:'assistant',source:{kind:'model',provider:'test',model:'test'},content:[{type:'text',text:'earlier work'}]})},{surfaceOp:'append'});
+ f.session.append('step/end',{turn:1,step:1});
+ const before=messages(f.session),{start,injection,seq}=await admittedInput(f,'steering',1,2,false);
+ f.session.append('step/end',{turn:1,step:2});f.session.append('turn/end',{turn:1,reason:{kind:'completed'}});
+ const plan=await f.engine.preview(f.session.id,seq),result=await f.engine.execute(f.session.id,plan.planId);
+ assert.deepEqual(messages(f.session),before);
+ assert.equal(result.state.hiddenTurns.includes(1),false);
+ assert.equal(result.state.hiddenSteps,2,'one removed step and one maintenance step');
+ assert.equal(hiddenNode({anchorSeq:start-0.1,data:{},location:{kind:'step',turn:{turn:1},step:{start:{seq:start}}}},result.state),true);
+ const kept={anchorSeq:1,data:{seq:1},location:{kind:'step',turn:{turn:1},step:{start:{seq:1}}}};
+ assert.equal(hiddenNode(kept,result.state),false);
+ const group={members:[{key:'kept'},{key:'injection'}],data:{turn:1}};
+ assert.deepEqual(visibleGroup(group,new Map([['kept',kept],['injection',{anchorSeq:injection}]]),result.state).members,[{key:'kept'}]);
+});
+
+test('second input in the same admission preserves the first input and shared prologue',async t=>{
+ const f=await fixture(t);await admittedInput(f,'first queued input',1);
+ const before=messages(f.session),m=createUserMessage({source:{kind:'user'},content:[{type:'text',text:'second queued input'}]});
+ await f.engine.checkpoint(f.agent,[m]);const seq=f.session.append('user/message',m,{surfaceOp:'append'}).seq;finish(f,'answer',1);
+ const plan=await f.engine.preview(f.session.id,seq),result=await f.engine.execute(f.session.id,plan.planId);
+ assert.deepEqual(messages(f.session),before);
+ assert.equal(result.state.hiddenTurns.includes(1),false);
+ assert.equal(result.state.hiddenSteps,1,'only the maintenance step is hidden');
+});
+
+test('legacy rewind ranges hide pre-input residues on cold reads without rewriting history or undo data',async t=>{
+ const f=await fixture(t),{start,injection,seq}=await admittedInput(f,'request',1);finish(f,'answer',1);
+ const st=await f.engine.store.load(f.session.id);st.hiddenRanges=[{start:seq,end:f.session.seq-1}];
+ await f.engine.store.save(st);const original=structuredClone(f.session.snapshotEvents());
+ f.ctx.sessions.get=()=>undefined;
+ f.ctx.sessionQuery={observeSession:async()=>({header:f.session.header,events:original,inheritedEventCount:0,[Symbol.dispose](){}})};
+ const state=await f.engine.getState(f.session.id);
+ assert.equal(state.hiddenRanges[0].start,0);assert.equal(state.hiddenSteps,1);
+ assert.equal(hiddenNode({anchorSeq:injection,data:{seq:injection}},state),true);
+ assert.equal(hiddenNode({anchorSeq:start-0.1,location:{kind:'step',turn:{turn:1},step:{start:{seq:start}}}},state),true);
+ assert.deepEqual((await f.engine.store.load(f.session.id)).hiddenRanges,st.hiddenRanges);
+ assert.deepEqual(f.session.snapshotEvents(),original);
+});
+
+test('input boundary never crosses prior output or tool side effects in the same step',()=>{
+ for(const type of ['assistant/message','assistant/live-chunk','tool/call','tool/result']){
+  const events=[{seq:0,type:'turn/start',data:{turn:1}},{seq:1,type:'step/start',data:{turn:1,step:1}},
+   {seq:2,type,data:{}},{seq:3,type:'user/message',data:{source:{kind:'user'}}}];
+  assert.equal(inputBoundaries(events).get(3),3,type);
+ }
 });
