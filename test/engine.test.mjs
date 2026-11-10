@@ -301,3 +301,26 @@ test('input boundary never crosses prior output or tool side effects in the same
   assert.equal(inputBoundaries(events).get(3),3,type);
  }
 });
+
+for (const replacement of ['prefix', 'middle', 'system-head']) test(`surface replay follows positions after ${replacement} replacement`, async t => {
+ const f=await fixture(t),s=f.session;
+ s.append('turn/start',{turn:1});s.append('step/start',{turn:1,step:1});
+ const role=replacement==='system-head'?'system':'developer';
+ const first=s.append(role+'/message',{turn:1,step:1,message:createMessage({role,source:{kind:'system-prompt'},content:[{type:'text',text:'retained prefix'}]})},{surfaceOp:'append'}).seq;
+ const middle=s.append('user/message',createUserMessage({source:{kind:'user'},content:[{type:'text',text:'earlier input'}]}),{surfaceOp:'append'}).seq;
+ s.append('developer/message',{turn:1,step:1,message:createMessage({role:'developer',source:{kind:'test-empty'},content:[]})},{surfaceOp:'append'});
+ const tail=s.append('user/message',createUserMessage({source:{kind:'user'},content:[{type:'text',text:'later input'}]}),{surfaceOp:'append'}).seq;
+ const replaced=replacement==='middle'?middle:first,old=s.eventAt(replaced);
+ const newest=s.append(old.type,structuredClone(old.data),{surfaceOp:{op:'replace',startSeq:replaced,endSeq:replaced},sourceEventSeqs:[replaced]}).seq;
+ finish(f,'later answer',1);
+ const original=structuredClone(s.snapshotEvents()),before=messages(s),desired=snapshot(s).slice(0,replacement==='middle'?2:1);
+ assert.equal(desired.at(-1).source,newest);assert.ok(newest>tail);
+ appendPrepared(s,prepareReplay(s,desired));
+ assert.deepEqual(messages(s),desired.map(item=>{const{id,...m}=item.type==='user/message'?item.data:item.data.message;return m;}));
+ assert.deepEqual(s.snapshotEvents().slice(0,original.length),original);
+ validateHistory(s);
+ const cold=Session.create(s.id,s.snapshotEvents(),s.header);
+ appendPrepared(cold,prepareReplay(cold,{atSeq:original.at(-1).seq+1}));
+ assert.deepEqual(messages(cold),before,'undo/recovery restores the exact nonmonotonic surface');
+ validateHistory(cold);
+});
