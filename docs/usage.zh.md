@@ -66,6 +66,7 @@ dsh plugin --profile web remove @gulagala001/dsh-undo-plugin
 ## 开发
 
 ```sh
+node scripts/prepare-host-sdk.mjs
 npm ci
 npm run build
 npm test

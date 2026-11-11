@@ -66,6 +66,7 @@ Uninstalling keeps existing backups. If you still want to undo an earlier rewind
 ## Development
 
 ```sh
+node scripts/prepare-host-sdk.mjs
 npm ci
 npm run build
 npm test
