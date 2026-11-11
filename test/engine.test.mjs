@@ -324,3 +324,36 @@ for (const replacement of ['prefix', 'middle', 'system-head']) test(`surface rep
  assert.deepEqual(messages(cold),before,'undo/recovery restores the exact nonmonotonic surface');
  validateHistory(cold);
 });
+
+test('unclaimed markers retire without consuming unrelated native input', async t => {
+  const f=await fixture(t), marker=Promise.withResolvers();
+  f.agent.steer=m=>marker.resolve(m);
+  const pending=f.engine.launch(f.session.id,{recovery:true});
+  const rejected=assert.rejects(pending,/丢弃/); await marker.promise;
+  const unrelated=createUserMessage({source:{kind:'user'},content:[{type:'text',text:'continue'}]});
+  const decision=await f.engine.preStep({agent:f.agent,messages:[unrelated],turn:1},()=>({kind:'enter',messages:[unrelated]}));
+  assert.equal(decision.kind,'enter');await rejected;assert.equal(f.engine.operations.size,0);
+});
+test('a flushed rollback receipt survives interrupted sidecar publication', async t => {
+  const f=await fixture(t); await user(f,'before',1); finish(f,'done',1);
+  const st=await f.engine.store.load(f.session.id);
+  st.journal={id:'rollback-once',nativeStart:f.session.seq,root:f.cwd,changes:[],context:{atSeq:f.session.seq},metadata:{cwd:f.cwd,plan:false}};
+  await f.engine.store.save(st);
+  const save=f.engine.store.save.bind(f.engine.store);
+  f.engine.store.save=async value=>{if(!value.journal)throw Error('sidecar unavailable');return save(value);};
+  await assert.rejects(f.engine.recover(f.session,await f.engine.store.load(f.session.id)),/sidecar unavailable/);
+  f.engine.store.save=save;
+  const history=structuredClone(f.session.snapshotEvents());
+  const cold=Session.create(f.session.id,history,f.session.header);
+  const beforeSecondRecovery=structuredClone(cold.snapshotEvents());
+  await f.engine.recover(cold,await f.engine.store.load(cold.id));
+  assert.deepEqual(cold.snapshotEvents(),beforeSecondRecovery);assert.equal((await f.engine.store.load(cold.id)).journal,null);
+});
+test('idle expiry releases preview objects without another preview request', async t => {
+  const f=await fixture(t), seq=await user(f,'preview',1);finish(f,'done',1);
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:Date.now()});
+  const p=await f.engine.preview(f.session.id,seq);
+  assert.ok(f.engine.plans.has(p.planId));
+  t.mock.timers.tick(300001);
+  assert.equal(f.engine.plans.size,0);await assert.rejects(f.engine.execute(f.session.id,p.planId),/过期/);
+});

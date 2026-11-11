@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {Files} from '../src/files.mjs';
 
 test('capture shares only pending path reads and refreshes settled filesystem observations',async t=>{
-  const dir=await fs.mkdtemp(join(tmpdir(),'rewind-path-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+  const dir=await fs.mkdtemp(join(await fs.realpath(tmpdir()),'rewind-path-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
   const root=join(dir,'project'),parent=join(root,'src'),outside=join(dir,'outside');
   await fs.mkdir(parent,{recursive:true});await fs.mkdir(outside);
   const files=new Files(join(dir,'store')),pending=new Map(),calls={stat:0,root:0};

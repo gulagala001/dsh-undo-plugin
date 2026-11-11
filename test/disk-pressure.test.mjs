@@ -237,3 +237,18 @@ test('failed compaction removes its temporary pack without discarding live recov
   assert.equal((await fs.readdir(join(root,'packs'))).length,1);
   assert.equal((await new Files(root).readBlob(before.manifest.keep.hash)).toString(),'keep');
 });
+
+test('collection repairs the local idle publication after a transient I/O error',async t=>{
+  const {root}=await fixture(t),engine={store:new Store(root),files:new Files(root),operations:new Map(),ctx:{}};
+  const owner=join(root,'owners','transient.json'),maintenance=new Maintenance(engine,owner);
+  t.after(()=>maintenance.dispose());
+  let once=true;const rename=fs.rename;
+  const mocked=t.mock.method(fs,'rename',async(from,to)=>{
+    if(once&&to===owner&&!(JSON.parse(await fs.readFile(from))).busy){once=false;throw Object.assign(Error('unavailable'),{code:'EIO'});}
+    return rename(from,to);
+  });
+  restoreMocks(t);await maintenance.run(()=>{});mocked.mock.restore();syncBuiltinESMExports();
+  assert.equal(JSON.parse(await fs.readFile(owner)).busy,true);
+  assert.equal((await maintenance.collect()).busy,false);
+  assert.equal(JSON.parse(await fs.readFile(owner)).busy,false);
+});
