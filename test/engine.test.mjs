@@ -10,7 +10,7 @@ import {inputBoundaries} from '../src/boundary.mjs';
 import {RewindEngine} from '../src/engine.mjs';
 import {snapshot,prepareReplay,appendPrepared,validateHistory} from '../src/conversation.mjs';
 const messages=s=>s.deriveMessages().map(({id,...m})=>m);
-async function fixture(t){const dir=await mkdtemp(join(tmpdir(),'rewind-'));t.after(()=>rm(dir,{recursive:true,force:true}));const cwd=join(dir,'project');await mkdir(cwd);const session=Session.create('same-session',undefined,{...Session.create('same-session').header,cwd});const agent={id:session.id,session,status:'idle',runMaintenance:fn=>fn()};const ctx={sessions:{get:()=>session,flush:async()=>{},messageProjections:[]},agents:{get:()=>agent,list:()=>[agent]}};const engine=new RewindEngine(ctx,join(dir,'store'));agent.inbox={nextTurn:[],nextStep:[],prepend(target,m){this[target==='next-turn'?'nextTurn':'nextStep'].unshift(m);}};agent.steer=m=>queueMicrotask(async()=>{const turn=(session.snapshotEvents().findLast(e=>e.type==='turn/start')?.data.turn||0)+1;session.append('turn/start',{turn});await engine.preStep({agent,messages:[m],turn,step:1},()=>{throw Error('maintenance requested model');});const end=session.append('turn/end',{turn,reason:{kind:'blocked'}});engine.finish(session,end);});return {dir,cwd,session,agent,engine,ctx};}
+async function fixture(t){const dir=await mkdtemp(join(tmpdir(),'rewind-'));t.after(()=>rm(dir,{recursive:true,force:true}));const cwd=join(dir,'project');await mkdir(cwd);const session=Session.create('same-session',undefined,{...Session.create('same-session').header,cwd});const agent={id:session.id,session,status:'idle',runMaintenance:fn=>fn()};const ctx={sessions:{get:()=>session,flush:async()=>true,messageProjections:[]},agents:{get:()=>agent,list:()=>[agent]}};const engine=new RewindEngine(ctx,join(dir,'store'));agent.inbox={nextTurn:[],nextStep:[],prepend(target,m){this[target==='next-turn'?'nextTurn':'nextStep'].unshift(m);}};agent.steer=m=>queueMicrotask(async()=>{const turn=(session.snapshotEvents().findLast(e=>e.type==='turn/start')?.data.turn||0)+1;session.append('turn/start',{turn});await engine.preStep({agent,messages:[m],turn,step:1},()=>{throw Error('maintenance requested model');});const end=session.append('turn/end',{turn,reason:{kind:'blocked'}});engine.finish(session,end);});return {dir,cwd,session,agent,engine,ctx};}
 async function user(f,text,turn){const m=createUserMessage({source:{kind:'user'},content:[{type:'text',text}]});f.session.append('turn/start',{turn});await f.engine.checkpoint(f.agent,[m]);const e=f.session.append('user/message',m,{surfaceOp:'append'});f.session.append('step/start',{turn,step:1});return e.seq;}
 function finish(f,text,turn){f.session.append('assistant/message',{turn,step:1,stream:[],message:createMessage({role:'assistant',source:{kind:'model',provider:'test',model:'test'},content:[{type:'text',text}]})},{surfaceOp:'append'});f.session.append('step/end',{turn,step:1});f.session.append('turn/end',{turn,reason:{kind:'completed'}});}
 const todo = s => s.snapshotEvents().findLast(e => e.type === 'todo/write')?.data;
@@ -55,7 +55,7 @@ test('failed replay publication restores the pre-operation task record through t
   if (type === 'plan/mode' && fail) { fail = false; throw Error('synthetic commit failure'); }
   return append(type, ...args);
  };
- f.ctx.sessions.flush = async () => { flushes++; };
+ f.ctx.sessions.flush = async () => { flushes++; return true; };
  await assert.rejects(f.engine.execute(f.session.id, plan.planId), /synthetic commit failure/);
  assert.deepEqual(todo(f.session), record);
  assert.equal((await f.engine.store.load(f.session.id)).journal, null);
@@ -356,4 +356,21 @@ test('idle expiry releases preview objects without another preview request', asy
   assert.ok(f.engine.plans.has(p.planId));
   t.mock.timers.tick(300001);
   assert.equal(f.engine.plans.size,0);await assert.rejects(f.engine.execute(f.session.id,p.planId),/过期/);
+});
+
+test('negative native durability receipt preserves recovery journal', async t => {
+  const f = await fixture(t);
+  f.ctx.sessions.flush = async () => false;
+  const st = {journal:{id:'probe',after:{journal:null}}};
+  const session = {snapshotEvents:()=>[{type:'plugin:dsh-rewind-plus/commit',data:{id:'probe'}}]};
+  await assert.rejects(f.engine.recover(session,st,true,true), /持久化未确认/);
+  assert.equal(st.journal.id,'probe');
+});
+
+test('failed maintenance read returns claimed user input to the inbox', async t => {
+  const f = await fixture(t), user = {id:'input',source:{kind:'user'}}, marker = {id:'marker',source:{kind:'dsh-rewind-plus'}};
+  f.engine.operations.set(f.agent.id,{agent:f.agent,marker:marker.id,queue:new Map([[user.id,'next-turn']])});
+  f.engine.store.load = async () => {throw Error('storage unavailable');};
+  const decision = await f.engine.preStep({agent:f.agent,messages:[marker,user],turn:1},()=>assert.fail());
+  assert.equal(decision.kind,'reject'); assert.deepEqual(f.agent.inbox.nextTurn,[user]);
 });
