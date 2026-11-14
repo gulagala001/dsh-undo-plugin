@@ -79,7 +79,7 @@ test('plain chat records a checkpoint without scanning files and backup failures
  f.engine.files.capture=async()=>{captures++;throw Error('synthetic backup unavailable');};
  const seq=await user(f,'chat',1);assert.equal(captures,0);
  let ran=false;await f.engine.tool({agent:f.agent},async()=>{ran=true;});assert.equal(ran,true);assert.equal(captures,1,'a failed pre-image must not trigger another full scan after the tool');
- finish(f,'done',1);const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,false);assert.match(plan.reason,/未完整备份/);
+ finish(f,'done',1);const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true);assert.match(plan.warnings.join(' '),/未完整备份/);await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);
 });
 
 test('snapshot timeout lets concurrent tools run, records the gap and avoids immediate rescans',async t=>{
@@ -101,7 +101,7 @@ test('snapshot timeout lets concurrent tools run, records the gap and avoids imm
  assert.equal(captures,1);
  finish(f,'done',1);
  const plan=await f.engine.preview(f.session.id,seq);
- assert.equal(plan.canApply,false);assert.match(plan.reason,/超出时间预算/);
+ assert.equal(plan.canApply,true);assert.match(plan.warnings.join(' '),/超出时间预算/);await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);
  assert.equal(f.engine.waves.size,0);
 });
 
@@ -122,8 +122,9 @@ for(const phase of ['before','after'])test(`cancel during the ${phase} snapshot 
  assert.deepEqual(await f.engine.tool({agent:f.agent},()=>++bodies),phase==='before'?1:2);
  finish(f,'done',1);
  const plan=await f.engine.preview(f.session.id,seq);
- assert.equal(plan.canApply,phase==='before');
- if(phase==='after')assert.match(plan.reason,/工具执行已取消/);
+ assert.equal(plan.canApply,true);
+ if(phase==='after')assert.match(plan.warnings.join(' '),/工具执行已取消/);
+ await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);
 });
 test('cold history can read rewind state without activating an agent, then preview resumes it',async t=>{
  const f=await fixture(t),seq=await user(f,'cold request',1);finish(f,'done',1);
@@ -154,8 +155,8 @@ test('picker reads cold and compacted history in bounded pages, omitting withdra
  const second=await f.engine.candidates(f.session.id,first.before);assert.deepEqual(second.items.map(i=>i.seq),seqs.slice(0,4).reverse());assert.ok(second.items.every(i=>i.conversationOnly));assert.equal(second.before,null);
  await assert.rejects(f.engine.candidates(f.session.id,-1),/无效/);
 });
-test('manual edits and stale confirmation do not get overwritten',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},()=>writeFile(join(f.cwd,'a'),'B'));finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);await writeFile(join(f.cwd,'a'),'manual');await assert.rejects(f.engine.execute(f.session.id,p.planId),/新的改动/);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'manual');assert.equal(f.session.deriveMessages().length,2);});
-test('restore failure compensates already written files and keeps undo evidence',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');await writeFile(join(f.cwd,'b'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},async()=>{await writeFile(join(f.cwd,'a'),'B');await writeFile(join(f.cwd,'b'),'B');});finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);const put=f.engine.files.put.bind(f.engine.files);let fail=true;f.engine.files.put=async(root,path,value,expected)=>{if(path==='b'&&fail){fail=false;throw Error('injected write failure');}return put(root,path,value,expected);};await assert.rejects(f.engine.execute(f.session.id,p.planId),/injected/);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'B');assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'B');assert.equal(f.session.deriveMessages().length,2);assert.equal((await f.engine.store.load(f.session.id)).journal,null);});
+test('manual edits and stale confirmation do not get overwritten',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},()=>writeFile(join(f.cwd,'a'),'B'));finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);await writeFile(join(f.cwd,'a'),'manual');await f.engine.execute(f.session.id,p.planId);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'manual');assert.equal(f.session.deriveMessages().length,0);const undo=await f.engine.preview(f.session.id,null,true);await f.engine.execute(f.session.id,undo.planId);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'manual');assert.equal(messages(f.session).length,2);});
+test('restore failure keeps only successful file changes in undo and still rewinds conversation',async t=>{const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');await writeFile(join(f.cwd,'b'),'A');const seq=await user(f,'edit',1);await f.engine.tool({agent:f.agent},async()=>{await writeFile(join(f.cwd,'a'),'B');await writeFile(join(f.cwd,'b'),'B');});finish(f,'done',1);const p=await f.engine.preview(f.session.id,seq);const put=f.engine.files.put.bind(f.engine.files);let fail=true;f.engine.files.put=async(root,path,value,expected)=>{if(path==='b'&&fail){fail=false;throw Error('injected write failure');}return put(root,path,value,expected);};await f.engine.execute(f.session.id,p.planId);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'A');assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'B');assert.equal(f.session.deriveMessages().length,0);assert.equal((await f.engine.store.load(f.session.id)).journal,null);const undo=await f.engine.preview(f.session.id,null,true);assert.deepEqual(undo.files.map(f=>f.path),['a']);await f.engine.execute(f.session.id,undo.planId);assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'B');assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'B');});
 test('tool-call pairing survives native surface replay',async t=>{const f=await fixture(t);await user(f,'tool',1);const call={type:'tool-call',id:'original-call',name:'read',arguments:'{}'};f.session.append('assistant/message',{turn:1,step:1,stream:[],message:createMessage({role:'assistant',source:{kind:'model',provider:'test',model:'test'},content:[call]})},{surfaceOp:'append'});f.session.append('tool/call',{turn:1,step:1,callId:'original-call',name:'read',arguments:'{}'});f.session.append('tool/result',{turn:1,step:1,message:{id:'result',role:'tool',source:{kind:'tool',name:'read',callId:'original-call'},toolCallId:'original-call',content:[{type:'text',text:'ok'}]}},{surfaceOp:'append'});f.session.append('step/end',{turn:1,step:1});f.session.append('turn/end',{turn:1,reason:{kind:'completed'}});const context=snapshot(f.session);appendPrepared(f.session,prepareReplay(f.session,[]));appendPrepared(f.session,prepareReplay(f.session,context));const ms=f.session.deriveMessages();assert.equal(ms[1].content[0].id,ms[2].toolCallId);assert.notEqual(ms[2].toolCallId,'original-call');assert.equal(f.session.snapshotEvents().filter(e=>e.type==='turn/start').length,3);Session.create(f.session.id,f.session.snapshotEvents(),f.session.header);validateHistory(f.session);});
 test('rewind crosses a compacted surface and undo restores that exact summary',async t=>{
  const f=await fixture(t),seq=await user(f,'old request',1);finish(f,'old answer',1);
@@ -174,7 +175,7 @@ test('child changes outside the parent workspace cannot claim complete restorati
  const seq=await user(f,'delegate elsewhere',1);
  const child={id:'child',session:Session.create('child',undefined,{...Session.create('child').header,cwd:other,origin:'subagent',parentSession:f.agent.id})};
  await f.engine.tool({agent:child},()=>writeFile(join(other,'a'),'outside'));finish(f,'done',1);
- const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,false);assert.match(plan.reason,/跨工作目录/);
+ const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true);assert.match(plan.warnings.join(' '),/跨工作目录/);await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);
  assert.equal(await readFile(join(other,'a'),'utf8'),'outside');
 });
 test('overlapping sessions are recorded as ambiguous and never overwrite each other',async t=>{
@@ -182,7 +183,7 @@ test('overlapping sessions are recorded as ambiguous and never overwrite each ot
  const other={id:'other',session:Session.create('other',undefined,{...Session.create('other').header,cwd:f.cwd})};let release,started;const began=new Promise(r=>started=r),wait=new Promise(r=>release=r);
  const first=f.engine.tool({agent:f.agent},async()=>{started();await wait;await writeFile(join(f.cwd,'a'),'first');});await began;
  await f.engine.tool({agent:other},()=>writeFile(join(f.cwd,'b'),'other'));release();await first;finish(f,'done',1);
- const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,false);assert.match(plan.reason,/其他会话/);assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'other');
+ const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true);assert.match(plan.warnings.join(' '),/其他会话/);await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);assert.equal(await readFile(join(f.cwd,'b'),'utf8'),'other');
 });
 test('interrupted file transaction is recovered from disk before another mutation',async t=>{
  const f=await fixture(t);await writeFile(join(f.cwd,'a'),'A');await user(f,'edit',1);await f.engine.tool({agent:f.agent},()=>writeFile(join(f.cwd,'a'),'B'));finish(f,'done',1);
@@ -192,18 +193,18 @@ test('interrupted file transaction is recovered from disk before another mutatio
  await f.engine.launch(f.session.id,{recovery:true});assert.equal(await readFile(join(f.cwd,'a'),'utf8'),'B');assert.equal((await f.engine.store.load(f.session.id)).journal,null);validateHistory(f.session);
 });
 
-test('a conflict during restoration keeps the journal and can resume after the conflict is resolved',async t=>{
+test('a conflict during restoration preserves the new edit through rewind and undo',async t=>{
  const f=await fixture(t),a=join(f.cwd,'a'),b=join(f.cwd,'b');await writeFile(a,'A1');await writeFile(b,'A2');const seq=await user(f,'edit',1);
  await f.engine.tool({agent:f.agent},async()=>{await writeFile(a,'B1');await writeFile(b,'B2');});finish(f,'done',1);
  const plan=await f.engine.preview(f.session.id,seq),before=messages(f.session),readBlob=f.engine.files.readBlob.bind(f.engine.files);
  f.engine.files.readBlob=async key=>{const bytes=await readBlob(key);if(bytes.toString()==='A2')await writeFile(b,'external edit');return bytes;};
- await assert.rejects(f.engine.execute(f.session.id,plan.planId),/恢复尚未完成/);
- assert.equal(await readFile(a,'utf8'),'A1');assert.equal(await readFile(b,'utf8'),'external edit');assert.deepEqual(messages(f.session),before);
- assert.ok((await f.engine.store.load(f.session.id)).journal);
+ await f.engine.execute(f.session.id,plan.planId);
+ assert.equal(await readFile(a,'utf8'),'A1');assert.equal(await readFile(b,'utf8'),'external edit');assert.equal(messages(f.session).length,0);
+ assert.equal((await f.engine.store.load(f.session.id)).journal,null);
  const {Store}=await import('../src/store.mjs'),{Files}=await import('../src/files.mjs');
- f.engine.store=new Store(join(f.dir,'store'));f.engine.files=new Files(join(f.dir,'store'));await writeFile(b,'B2');
- await f.engine.launch(f.session.id,{recovery:true});
- assert.equal(await readFile(a,'utf8'),'B1');assert.equal(await readFile(b,'utf8'),'B2');assert.equal((await f.engine.store.load(f.session.id)).journal,null);
+ f.engine.store=new Store(join(f.dir,'store'));f.engine.files=new Files(join(f.dir,'store'));
+ const undo=await f.engine.preview(f.session.id,null,true);await f.engine.execute(f.session.id,undo.planId);
+ assert.equal(await readFile(a,'utf8'),'B1');assert.equal(await readFile(b,'utf8'),'external edit');assert.equal((await f.engine.store.load(f.session.id)).journal,null);
  assert.deepEqual(messages(f.session),before);validateHistory(f.session);
 });
 
@@ -373,4 +374,69 @@ test('failed maintenance read returns claimed user input to the inbox', async t 
   f.engine.store.load = async () => {throw Error('storage unavailable');};
   const decision = await f.engine.preStep({agent:f.agent,messages:[marker,user],turn:1},()=>assert.fail());
   assert.equal(decision.kind,'reject'); assert.deepEqual(f.agent.inbox.nextTurn,[user]);
+});
+
+test('legacy disposable browser records never block rewind, undo or recovery',async t=>{
+ const f=await fixture(t),seq=await user(f,'render',1),file=join(f.cwd,'page.html');
+ await f.engine.tool({agent:f.agent},()=>writeFile(file,'page'));finish(f,'done',1);
+ const st=await f.engine.store.load(f.session.id),path='.local/browser-checks/opencu-check-old/Default/Cache/entry';
+ const entry={kind:'file',hash:'a'.repeat(64),mode:0o600};
+ st.changes[0].changes.push({path,before:null,after:entry});
+ st.changes.push({root:f.cwd,owners:[f.session.id],changes:[{path,before:{...entry,hash:'b'.repeat(64)},after:null}]});
+ await f.engine.store.save(st);
+ const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true);assert.deepEqual(plan.files.map(f=>f.path),['page.html']);
+ await f.engine.execute(f.session.id,plan.planId);await assert.rejects(readFile(file),{code:'ENOENT'});
+ const undo=await f.engine.preview(f.session.id,null,true);await f.engine.execute(f.session.id,undo.planId);assert.equal(await readFile(file,'utf8'),'page');
+ const recovered=await f.engine.files.recover(f.cwd,[{path,before:null,after:entry}],'after',{bestEffort:true});assert.deepEqual(recovered.skipped,[]);
+});
+
+test('confirm stops only the running conversation and its children automatically',async t=>{
+ const f=await fixture(t),seq=await user(f,'running',1);finish(f,'done',1);
+ const child={id:'child',status:'running',session:Session.create('child',undefined,{...Session.create('child').header,cwd:f.cwd,origin:'subagent',parentSession:f.agent.id})};
+ const other={id:'foreign',status:'running',session:Session.create('foreign',undefined,{...Session.create('foreign').header,cwd:join(f.dir,'elsewhere')})};
+ const agents=[f.agent,child,other],stopped=[];f.agent.status='running';
+ for(const a of agents){a.cancel=()=>{stopped.push(a.id);a.status='idle';};a.whenIdle=async()=>assert.equal(a.status,'idle');}
+ f.ctx.agents={list:()=>agents,get:id=>agents.find(a=>a.id===id)};
+ const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true);assert.equal(plan.canStop,true);
+ await f.engine.execute(f.session.id,plan.planId);assert.deepEqual(stopped,[f.agent.id,child.id]);assert.equal(other.status,'running');assert.equal(messages(f.session).length,0);
+});
+
+test('missing backup bytes and an occupied workspace still allow conversation rewind',async t=>{
+ for(const fault of ['missing-blob','workspace-lock']){
+  const f=await fixture(t),file=join(f.cwd,'a');await writeFile(file,'A');const seq=await user(f,fault,1);
+  await f.engine.tool({agent:f.agent},()=>writeFile(file,'B'));finish(f,'done',1);
+  let release;
+  if(fault==='missing-blob')f.engine.files.readBlob=async()=>{throw Error('backup missing');};
+  else {const {lease,hash}=await import('../src/store.mjs');release=await lease(join(f.dir,'store/workspace-locks',hash(f.cwd)+'.json'));}
+  try{const plan=await f.engine.preview(f.session.id,seq);await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);assert.equal(await readFile(file,'utf8'),'B');assert.equal((await f.engine.store.load(f.session.id)).undo.at(-1).changes.length,0);}
+  finally{await release?.();}
+ }
+});
+
+test('interrupted recovery keeps externally edited files and lets confirmation finish',async t=>{
+ const f=await fixture(t),file=join(f.cwd,'a');await writeFile(file,'A');const seq=await user(f,'edit',1);
+ await f.engine.tool({agent:f.agent},()=>writeFile(file,'B'));finish(f,'done',1);
+ const st=await f.engine.store.load(f.session.id),record=st.changes[0];
+ st.journal={id:'interrupted',nativeStart:f.session.seq,root:f.cwd,changes:record.changes,context:{atSeq:f.session.seq},metadata:f.engine.metadata(f.session)};await f.engine.store.save(st);
+ await writeFile(file,'manual');
+ const plan=await f.engine.preview(f.session.id,seq);assert.equal(plan.canApply,true);
+ await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);assert.equal(await readFile(file,'utf8'),'manual');assert.equal((await f.engine.store.load(f.session.id)).journal,null);validateHistory(f.session);
+});
+
+test('an expired confirmation refreshes the same selected message without another dialog',async t=>{
+ const f=await fixture(t),seq=await user(f,'edit',1);finish(f,'done',1);
+ const plan=await f.engine.preview(f.session.id,seq);f.engine.plans.delete(plan.planId);
+ await f.engine.execute(f.session.id,plan.planId,undefined,{seq,undo:false});assert.equal(messages(f.session).length,0);
+});
+
+test('undo records actual writes, not an external edit that happens to match the restore target',async t=>{
+ for(const fault of ['external-match','after-write']){
+  const f=await fixture(t),file=join(f.cwd,'a');await writeFile(file,'A');const seq=await user(f,fault,1);
+  await f.engine.tool({agent:f.agent},()=>writeFile(file,'B'));finish(f,'done',1);
+  if(fault==='external-match'){const read=f.engine.files.readBlob.bind(f.engine.files);f.engine.files.readBlob=async key=>{const bytes=await read(key);await writeFile(file,'A');return bytes;};}
+  else {const put=f.engine.files.put.bind(f.engine.files);f.engine.files.put=async(...args)=>{await put(...args);throw Error('directory sync unavailable');};}
+  const plan=await f.engine.preview(f.session.id,seq);await f.engine.execute(f.session.id,plan.planId);
+  assert.equal(messages(f.session).length,0);assert.equal(await readFile(file,'utf8'),'A');
+  const state=await f.engine.store.load(f.session.id);assert.equal(state.undo.at(-1).changes.length,fault==='external-match'?0:1);
+ }
 });

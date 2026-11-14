@@ -32,3 +32,16 @@ test('capture shares only pending path reads and refreshes settled filesystem ob
   await fs.rename(root,root+'-old');await fs.symlink(outside,root);
   await assert.rejects(files.path(root,'file',pending),/工作区路径已改变/);assert.equal(pending.size,0);
 });
+
+test('Git and plain directories exclude only owned disposable browser profiles',async t=>{
+ const {execFileSync}=await import('node:child_process');
+ const dir=await fs.mkdtemp(join(await fs.realpath(tmpdir()),'rewind-scope-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ for(const git of [false,true]){
+  const root=join(dir,String(git));await fs.mkdir(root);
+  const paths=['page.html','.local/notes.txt','.local/browser-checks/screenshot.png','nested/.local/browser-checks/opencu-check-abcd/Default/Cache/entry'];
+  for(const path of paths){await fs.mkdir(join(root,path,'..'),{recursive:true});await fs.writeFile(join(root,path),'bytes');}
+  if(git){execFileSync('git',['init','-q',root]);execFileSync('git',['-C',root,'add','.']);}
+  const files=new Files(join(dir,'store-'+git));const snapshot=await files.capture(root);
+  assert.deepEqual(Object.keys(snapshot.manifest).sort(),paths.slice(0,3).sort());
+ }
+});
