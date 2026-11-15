@@ -407,7 +407,7 @@ test('missing backup bytes and an occupied workspace still allow conversation re
   await f.engine.tool({agent:f.agent},()=>writeFile(file,'B'));finish(f,'done',1);
   let release;
   if(fault==='missing-blob')f.engine.files.readBlob=async()=>{throw Error('backup missing');};
-  else {const {lease,hash}=await import('../src/store.mjs');release=await lease(join(f.dir,'store/workspace-locks',hash(f.cwd)+'.json'));}
+  else {const {lease,hash}=await import('../src/store.mjs');const root=await f.engine.files.workspace(f.cwd);release=await lease(join(f.dir,'store/workspace-locks',hash(root)+'.json'));}
   try{const plan=await f.engine.preview(f.session.id,seq);await f.engine.execute(f.session.id,plan.planId);assert.equal(messages(f.session).length,0);assert.equal(await readFile(file,'utf8'),'B');assert.equal((await f.engine.store.load(f.session.id)).undo.at(-1).changes.length,0);}
   finally{await release?.();}
  }
