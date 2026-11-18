@@ -1,7 +1,5 @@
 # DSH Undo 0.1.18 · DSH 0.2.2-rc.3
 
-**未发布 / Unreleased.**
-
 [中文](#zh-0118) · [English](#en-0118)
 
 <a id="zh-0118"></a>
