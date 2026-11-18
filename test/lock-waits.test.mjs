@@ -67,7 +67,7 @@ test('failed or cancelled lock publication removes its own file and preserves a 
       if(mode==='failure')throw Error('publication failed');
       await write.apply(this,args);
       if(mode==='replacement'){
-        await rm(file);const replacement=await open(file,'wx');
+        const replacement=await open(file,'wx');
         try{await write.call(replacement,'replacement owner');}finally{await replacement.close();}
       }
       controller.abort(Error('cancel publication'));
@@ -132,4 +132,43 @@ test('a cancelled pack wait leaves no cache or unpublished data that a later cap
   await release();
   const result=await files.capture(workspace);
   assert.equal((await files.readBlob(result.manifest.sample.hash)).toString(),'kept bytes');
+});
+
+test('team reads and waits bypass backup admission while arbitrary programs and edits stay fenced',async t=>{
+  const {root}=await fixture(t);
+  const definitions=new Map([
+    ['read',{name:'read',description:'Read a UTF-8 text file and return line-numbered content.'}],
+    ['wait_agent',{name:'wait_agent',description:'Wait for input at your next step, including agent messages.'}],
+  ]);
+  const engine=new RewindEngine({get:()=>({get:name=>definitions.get(name)})},root);
+  const agent={id:'member',session:{header:{cwd:root}},ctx:{get:()=>({programFormat:'function-body'})}};
+  engine.root=async()=>root;
+  engine.busy.add(root);
+  for(const [name,code] of [['read'],['wait_agent'],['run_code','return await tools.wait_agent({timeout_ms: 60000});'],
+    ['run_code','console.log(await tools.read({file_path:"notes.md"}));']]){
+    const exec={name,agent,arguments:{code}};
+    assert.equal(engine.tracksTool(exec),false); // tools/execute bypasses maintenance here
+    assert.equal(await engine.tool(exec,()=>42),42);
+  }
+  definitions.set('read',{name:'read',description:'Third-party import into the workspace'});
+  for(const [name,code] of [['read'],['write'],['run_code','await tools.read({file_path:"a"})'],
+    ['run_code','await tools.wait_agent({timeout_ms: compute()})'],
+    ['run_code','await tools.wait_agent({}); await tools.write({})']]){
+    await assert.rejects(engine.tool({name,agent,arguments:{code}},()=>assert.fail()),{code:'REWIND_WORKSPACE_BUSY'});
+  }
+});
+
+test('successive dead reapers can be reclaimed without admitting two writers',async t=>{
+  const {file}=await fixture(t);
+  const {spawnSync}=await import('node:child_process');
+  const exited=spawnSync(process.execPath,['-e','']);
+  assert.equal(exited.status,0);
+  for(const path of [file,file+'.reap',file+'.reap.reap'])await writeFile(path,JSON.stringify({pid:exited.pid,nonce:path}));
+  let active=0;
+  await Promise.all(Array.from({length:4},async()=>{
+    const release=await lease(file,{waitMs:1500});
+    try{assert.equal(++active,1);await new Promise(r=>setImmediate(r));}
+    finally{active--;await release();}
+  }));
+  for(const path of [file,file+'.reap',file+'.reap.reap'])await assert.rejects(readFile(path),{code:'ENOENT'});
 });
